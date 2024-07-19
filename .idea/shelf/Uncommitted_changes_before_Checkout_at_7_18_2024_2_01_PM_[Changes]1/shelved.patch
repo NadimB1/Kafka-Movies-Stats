@@ -1,0 +1,35 @@
+Index: kafka-stream/src/main/scala/org/esgi/project/Main.scala
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>package org.esgi.project\r\n\r\n\r\nimport akka.actor.ActorSystem\r\nimport akka.http.scaladsl.Http\r\nimport com.typesafe.config.{Config, ConfigFactory}\r\nimport org.apache.kafka.streams.KafkaStreams\r\nimport org.esgi.project.api.WebServer\r\nimport org.esgi.project.streaming.StreamProcessing\r\nimport org.slf4j.{Logger, LoggerFactory}\r\n\r\nimport scala.concurrent.ExecutionContextExecutor\r\n\r\nobject Main {\r\n  implicit val system: ActorSystem = ActorSystem.create(\"this-system\")\r\n  implicit val executionContext: ExecutionContextExecutor = system.dispatcher\r\n\r\n  val logger: Logger = LoggerFactory.getLogger(this.getClass)\r\n  val config: Config = ConfigFactory.load()\r\n\r\n  def main(args: Array[String]) {\r\n    val streams: KafkaStreams = StreamProcessing.run()\r\n    Http()\r\n      .newServerAt(\"0.0.0.0\", 8080)\r\n      .bindFlow(WebServer.routes(streams))\r\n    logger.info(s\"App started on 8080\")\r\n  }\r\n}\r\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/kafka-stream/src/main/scala/org/esgi/project/Main.scala b/kafka-stream/src/main/scala/org/esgi/project/Main.scala
+--- a/kafka-stream/src/main/scala/org/esgi/project/Main.scala	
++++ b/kafka-stream/src/main/scala/org/esgi/project/Main.scala	
+@@ -1,6 +1,5 @@
+ package org.esgi.project
+ 
+-
+ import akka.actor.ActorSystem
+ import akka.http.scaladsl.Http
+ import com.typesafe.config.{Config, ConfigFactory}
+Index: kafka-stream/src/main/scala/org/esgi/project/streaming/StreamProcessing.scala
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>package org.esgi.project.streaming\r\n\r\nimport de.heikoseeberger.akkahttpplayjson.PlayJsonSupport\r\nimport io.github.azhur.kafka.serde.PlayJsonSupport.toSerde\r\nimport org.apache.kafka.streams.KafkaStreams\r\nimport org.apache.kafka.streams.kstream.{JoinWindows, TimeWindows, Windowed}\r\nimport org.apache.kafka.streams.scala._\r\nimport org.apache.kafka.streams.scala.kstream._\r\nimport org.esgi.project.streaming.models.{InfoStatMovie, Likes, LikesWithTitle, MeanScoreForFilm, Views}\r\n\r\nimport java.io.InputStream\r\nimport java.time.Duration\r\nimport java.util.Properties\r\nimport java.util.UUID\r\n\r\nobject StreamProcessing extends PlayJsonSupport {\r\n\r\n  import org.apache.kafka.streams.scala.ImplicitConversions._\r\n  import org.apache.kafka.streams.scala.serialization.Serdes._\r\n\r\n  val groupnumber: String = \"groupe-1\"\r\n\r\n  val applicationBaseName = s\"web-events-stream-app-$groupnumber\"\r\n  val likesTopicName: String = \"likes\"\r\n  val viewsTopicName: String = \"views\"\r\n\r\n  val lastMinuteStoreName = \"NumberViewsOfLast1Minute\"\r\n  val lastFiveMinutesStoreName = \"NumberViewsOfLast5Minute\"\r\n  val MeanScorePerFilmStoreName = \"MeanScorePerFilm\"\r\n  val TotalViewsPerFilmStoreName = \"TotalViewsPerFilm\"\r\n\r\n  // defining processing graph\r\n  val builder: StreamsBuilder = new StreamsBuilder\r\n\r\n  val likes: KStream[String, Likes] = builder.stream[String, Likes](likesTopicName)\r\n  val views: KStream[String, Views] = builder.stream[String, Views](viewsTopicName)\r\n\r\n  val viewsGroupedByMovie: KGroupedStream[Long, Views] = views.groupBy((key, value) => value.id)\r\n\r\n  val windows1min: TimeWindows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1)).advanceBy(Duration.ofMinutes(1))\r\n  val viewsOfLast1Minute: KTable[Windowed[Long], InfoStatMovie] = viewsGroupedByMovie\r\n    .windowedBy(windows1min)\r\n    .aggregate(InfoStatMovie.empty)(\r\n      (k, v, agg) => agg.incrementation(v.view_category).attributeTitle(v.title)\r\n    )(Materialized.as(lastMinuteStoreName))\r\n\r\n  val windows5min: TimeWindows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(5)).advanceBy(Duration.ofMinutes(1))\r\n  val viewsOfLast5Minutes: KTable[Windowed[Long], InfoStatMovie] = viewsGroupedByMovie\r\n    .windowedBy(windows5min)\r\n    .aggregate(InfoStatMovie.empty)(\r\n      (k, v, agg) => agg.incrementation(v.view_category).attributeTitle(v.title)\r\n    )(Materialized.as(lastFiveMinutesStoreName))\r\n\r\n  val viewsTotal: KTable[String, Long] = views\r\n    .groupBy((k, v) => v.title)\r\n    .count()(Materialized.as(TotalViewsPerFilmStoreName))\r\n\r\n\r\n  val likesWithViews: KStream[String, LikesWithTitle] = likes.join(views)(\r\n    (likes: Likes, views: Views) => LikesWithTitle(likes.id, views.title, likes.score),\r\n    JoinWindows.of(Duration.ofMinutes(2))\r\n  )\r\n\r\n  val meanScorePerFilm: KTable[Long, MeanScoreForFilm] = likesWithViews.groupBy((_, value) => value.id)\r\n    .aggregate(MeanScoreForFilm.empty)(\r\n      (_, v, agg) => {\r\n        agg.increment(v.score)\r\n      }.computeMeanScore.attributeTitle(v.title)\r\n    )(Materialized.as(MeanScorePerFilmStoreName))\r\n\r\n  def run(): KafkaStreams = {\r\n    val uniqueAppName = s\"$applicationBaseName-${UUID.randomUUID().toString}\"\r\n    val streams: KafkaStreams = new KafkaStreams(builder.build(), buildProperties(Some(uniqueAppName)))\r\n    streams.start()\r\n\r\n    Runtime.getRuntime.addShutdownHook(new Thread(new Runnable() {\r\n      override def run {\r\n        streams.close\r\n      }\r\n    }))\r\n    streams\r\n  }\r\n\r\n  def buildProperties(appName: Option[String] = None): Properties = {\r\n    import org.apache.kafka.clients.consumer.ConsumerConfig\r\n    import org.apache.kafka.streams.StreamsConfig\r\n    val inputStream: InputStream = getClass.getClassLoader.getResourceAsStream(\"kafka.properties\")\r\n\r\n    val properties = new Properties()\r\n    properties.put(StreamsConfig.APPLICATION_ID_CONFIG, appName.getOrElse(applicationBaseName))\r\n    properties.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, \"localhost:9092\")  // Make sure this matches your Kafka setup\r\n    properties.put(StreamsConfig.STATE_DIR_CONFIG, \"D:\\\\kafka_temp\")\r\n    properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, \"latest\")\r\n    properties.put(StreamsConfig.REPLICATION_FACTOR_CONFIG, \"-1\")\r\n    properties.load(inputStream)\r\n    properties\r\n  }\r\n}\r\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/kafka-stream/src/main/scala/org/esgi/project/streaming/StreamProcessing.scala b/kafka-stream/src/main/scala/org/esgi/project/streaming/StreamProcessing.scala
+--- a/kafka-stream/src/main/scala/org/esgi/project/streaming/StreamProcessing.scala	
++++ b/kafka-stream/src/main/scala/org/esgi/project/streaming/StreamProcessing.scala	
+@@ -29,7 +29,6 @@
+   val MeanScorePerFilmStoreName = "MeanScorePerFilm"
+   val TotalViewsPerFilmStoreName = "TotalViewsPerFilm"
+ 
+-  // defining processing graph
+   val builder: StreamsBuilder = new StreamsBuilder
+ 
+   val likes: KStream[String, Likes] = builder.stream[String, Likes](likesTopicName)
