@@ -1,4 +1,4 @@
-# kafka_films
+# Preview movies stats using kafka and streamlit
 - Add a Venv to run the Streamlit interface in /front/main.py
 - You must have docker running
 - Run Docker-compose.yaml (it will create the producer and the broker containers)
